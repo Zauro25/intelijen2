@@ -1,175 +1,248 @@
 import streamlit as st
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.cluster import KMeans
 import plotly.express as px
 import numpy as np
-import joblib 
 
-# Load data
+# ============================
+# 📥 LOAD & PREPROCESS DATA
+# ============================
+
 df = pd.read_csv('HR_Analytics.csv')
 
-# Encoding
-le = LabelEncoder()
-df['OverTime'] = le.fit_transform(df['OverTime'])
-df['JobRole'] = le.fit_transform(df['JobRole'])
-df['Department'] = le.fit_transform(df['Department'])
-df['Attrition'] = le.fit_transform(df['Attrition'])  # Yes=1, No=0
+# Encode hanya kolom biner OverTime
+df['OverTime'] = df['OverTime'].map({'Yes': 1, 'No': 0})
 
-# Sidebar
+# Biarkan JobRole & Department tetap string (tidak encode)
+df['Attrition'] = df['Attrition'].replace({'Yes': 1, 'No': 0})  # Target binary
+
+# ============================
+# 📊 SIDEBAR MENU
+# ============================
+
 st.sidebar.title("📊 Dashboard HR Analytics")
 menu = st.sidebar.radio("Pilih Menu:", ["📌 Prediksi Attrition", "💰 Prediksi Gaji", "👥 Segmentasi Karyawan"])
 
-# === 1. Attrition (Klasifikasi) ===
-if menu == "📌 Prediksi Attrition":
-    st.title("📌 Prediksi Karyawan Akan Resign atau Tidak")
+# ============================
+# 1️⃣ PREDIKSI ATTRITION
+# ============================
 
-    # Input data
+if menu == "📌 Prediksi Attrition":
+    st.title("📌 Prediksi Karyawan Resign")
+
+    # Form Input
     age = st.slider("Umur", 18, 60, 30)
-    distance = st.slider("Jarak dari rumah ke kantor", 1, 30, 5)
-    job_sat = st.selectbox("Job Satisfaction", [1, 2, 3, 4])
-    env_sat = st.selectbox("Environment Satisfaction", [1, 2, 3, 4])
-    monthly_income = st.number_input("Pendapatan Bulanan", min_value=0, max_value=100_000_000_000, step=1)
-    years = st.slider("Lama bekerja di perusahaan", 0, 40, 3)
-    overtime = st.selectbox("Lembur?", ["Tidak", "Ya"])
+    distance = st.slider("Jarak Rumah ke Kantor (km)", 1, 50, 10)
+    income = st.number_input("Pendapatan Bulanan (Rp)", min_value=1000000, max_value=100_000_000, value=7000000, step=500000)
+    overtime = st.radio("Lembur?", ["Yes", "No"])
+    years = st.slider("Lama Bekerja (Tahun)", 0, 40, 5)
     jobrole = st.selectbox("Jabatan", sorted(df['JobRole'].unique()))
     dept = st.selectbox("Departemen", sorted(df['Department'].unique()))
+    jobsat = st.selectbox("Kepuasan Kerja (1 = rendah, 4 = sangat puas)", [1, 2, 3, 4])
 
-    input_data = pd.DataFrame([[age, distance, job_sat, env_sat, monthly_income,
-                                years, 1 if overtime == "Ya" else 0,
-                                jobrole, dept]],
-                              columns=['Age', 'DistanceFromHome', 'JobSatisfaction',
-                                       'EnvironmentSatisfaction', 'MonthlyIncome',
-                                       'YearsAtCompany', 'OverTime', 'JobRole', 'Department'])
+    input_data = pd.DataFrame([{
+        'Age': age,
+        'DistanceFromHome': distance,
+        'MonthlyIncome': income,
+        'OverTime': 1 if overtime == "Yes" else 0,
+        'YearsAtCompany': years,
+        'JobRole': jobrole,
+        'Department': dept,
+        'JobSatisfaction': jobsat
+    }])
+
+    data_model = df[['Age', 'DistanceFromHome', 'MonthlyIncome', 'OverTime', 'YearsAtCompany',
+                     'JobRole', 'Department', 'JobSatisfaction', 'Attrition']]
+
+    # Gabung & One-hot encode
+    combined = pd.concat([data_model.drop(columns='Attrition'), input_data], axis=0)
+    combined_encoded = pd.get_dummies(combined, columns=['JobRole', 'Department'])
+    input_encoded = combined_encoded.tail(1)
+    X = combined_encoded.iloc[:-1]
+    y = data_model['Attrition']
 
     # Model
-    model = RandomForestClassifier()
-    X = df[['Age', 'DistanceFromHome', 'JobSatisfaction', 'EnvironmentSatisfaction',
-            'MonthlyIncome', 'YearsAtCompany', 'OverTime', 'JobRole', 'Department']]
-    y = df['Attrition']
+    model = RandomForestClassifier(random_state=42)
     model.fit(X, y)
 
-    pred = model.predict(input_data)[0]
-    # Feature importance
+    pred = model.predict(input_encoded)[0]
+    pred_prob = model.predict_proba(input_encoded)[0][1]
 
-    # Output prediksi
-    st.subheader("📢 Hasil Prediksi:")
     if pred == 1:
-        st.error("⚠️ Karyawan ini berpotensi **AKAN** resign.")
+        st.error(f"⚠️ Karyawan ini **berpotensi resign** (Probabilitas: {pred_prob:.2%})")
     else:
-        st.success("✅ Karyawan ini kemungkinan **TIDAK AKAN** resign.")
+        st.success(f"✅ Karyawan ini **kemungkinan besar bertahan** (Probabilitas resign: {pred_prob:.2%})")
 
-    # Alasan (feature importance)
+    # Alasan
     importances = model.feature_importances_
-    sorted_idx = np.argsort(importances)[::-1]
-    top_feats = [(input_data.columns[i], input_data.iloc[0, i], importances[i]) for i in sorted_idx[:3]]
+    feat_names = input_encoded.columns
+    sorted_idx = importances.argsort()[::-1]
 
-    st.markdown("### 🔍 Alasan Prediksi")
-
-    def interpret_reason(feat, val):
-        if feat == "MonthlyIncome":
-            return "karena gajinya tergolong rendah" if val < 3000 else "karena gajinya cukup tinggi"
+    st.markdown("### 🔍 Faktor Utama Prediksi:")
+    def interpret_attr(feat):
+        if "JobRole_" in feat:
+            return "jenis jabatan tertentu"
+        elif "Department_" in feat:
+            return "jenis departemen"
+        elif feat == "MonthlyIncome":
+            return "gaji rendah" if income < 5000000 else "gaji tinggi"
         elif feat == "OverTime":
-            return "karena sering lembur" if val == 1 else "karena tidak lembur"
-        elif feat == "Age":
-            return "karena usia sudah mendekati pensiun" if val >= 55 else "karena usia masih produktif"
-        elif feat == "DistanceFromHome":
-            return "karena jarak rumah ke kantor cukup jauh" if val > 15 else "karena jarak rumah dekat"
-        elif feat == "JobSatisfaction":
-            return "karena tingkat kepuasan kerja rendah" if val <= 2 else "karena cukup puas dengan pekerjaannya"
-        elif feat == "EnvironmentSatisfaction":
-            return "karena tidak nyaman dengan lingkungan kerja" if val <= 2 else "karena cukup nyaman dengan lingkungan kerja"
+            return "sering lembur" if overtime == "Yes" else "tidak lembur"
         elif feat == "YearsAtCompany":
-            return "karena belum lama bekerja" if val < 2 else "karena sudah cukup lama bekerja"
+            return "lama kerja singkat" if years <= 2 else "lama kerja panjang"
+        elif feat == "Age":
+            return "usia muda" if age < 30 else "usia menengah/tinggi"
+        elif feat == "JobSatisfaction":
+            return "kepuasan kerja rendah" if jobsat <= 2 else "kepuasan kerja tinggi"
+        elif feat == "DistanceFromHome":
+            return "jarak rumah jauh" if distance > 20 else "jarak rumah dekat"
         else:
-            return "berkontribusi pada keputusan"
+            return "faktor lain"
 
-    for feat, val, score in top_feats:
-        reason = interpret_reason(feat, val)
-        st.markdown(f"- **{feat} = {val}** → {reason} *(importance: {score:.2f})*")
+    for idx in sorted_idx[:5]:
+        feat = feat_names[idx]
+        score = importances[idx]
 
-    # Visualisasi pie chart attrition
-    st.subheader("📊 Distribusi Karyawan Resign vs Tidak")
-    attrition_counts = df['Attrition'].value_counts().rename({0: "Tidak Resign", 1: "Resign"})
-    fig = px.pie(names=attrition_counts.index, values=attrition_counts.values,
-                 title="Distribusi Karyawan")
+    # Ubah nama jadi lebih manusiawi
+        if "JobRole_" in feat:
+            readable = f"jabatan {feat.split('_')[1]}"
+            alasan = "jenis jabatan tertentu"
+        elif "Department_" in feat:
+            readable = f"departemen {feat.split('_')[1]}"
+            alasan = "jenis departemen"
+        elif feat == "MonthlyIncome":
+            readable = "Pendapatan Bulanan"
+            alasan = "gaji rendah" if income < 5000000 else "gaji tinggi"
+        elif feat == "OverTime":
+            readable = "Status Lembur"
+            alasan = "sering lembur" if overtime == "Yes" else "tidak lembur"
+        elif feat == "YearsAtCompany":
+            readable = "Lama Kerja"
+            alasan = "lama kerja singkat" if years <= 2 else "lama kerja panjang"
+        elif feat == "Age":
+            readable = "Umur"
+            alasan = "usia muda" if age < 30 else "usia menengah/tinggi"
+        elif feat == "JobSatisfaction":
+            readable = "Kepuasan Kerja"
+            alasan = "kepuasan kerja rendah" if jobsat <= 2 else "kepuasan kerja tinggi"
+        elif feat == "DistanceFromHome":
+            readable = "Jarak Rumah-Kantor"
+            alasan = "jarak rumah jauh" if distance > 20 else "jarak rumah dekat"
+        else:
+            readable = feat
+            alasan = "faktor lain"
+
+        st.markdown(f"- **{readable}** → {alasan} *(importance: {score:.2f})*")
+
+
+    # Pie Chart
+    st.subheader("📊 Distribusi Attrition")
+    attr_count = df['Attrition'].value_counts()
+    fig = px.pie(values=attr_count.values, names=['Bertahan', 'Resign'], 
+                 title="Distribusi Resign Karyawan", color_discrete_sequence=px.colors.sequential.RdBu)
     st.plotly_chart(fig)
 
+# ============================
+# 2️⃣ PREDIKSI GAJI
+# ============================
 
-# === 2. Prediksi Gaji (Regresi) ===
 elif menu == "💰 Prediksi Gaji":
     st.title("💰 Estimasi Gaji Karyawan")
 
-    # Encoder konsisten
-    le_job = LabelEncoder()
-    df['JobRole'] = le_job.fit_transform(df['JobRole'])
-
-    # Input dari user
-    jobrole_str = st.selectbox("Jabatan", le_job.classes_)
-    jobrole = le_job.transform([jobrole_str])[0]
-    joblevel = st.selectbox("Level Jabatan", [1, 2, 3, 4, 5])
-    education = st.selectbox("Tingkat Pendidikan", [1, 2, 3, 4, 5])
+    jobrole = st.selectbox("Jabatan", sorted(df['JobRole'].unique()))
+    joblevel = st.selectbox("Level Jabatan", sorted(df['JobLevel'].unique()))
+    education = st.selectbox("Tingkat Pendidikan", sorted(df['Education'].unique()))
     years_company = st.slider("Lama di Perusahaan (tahun)", 0, 40, 5)
-    rating = st.selectbox("Performance Rating", [1, 2, 3, 4])
+    rating = st.selectbox("Performance Rating", sorted(df['PerformanceRating'].unique()))
     total_years = st.slider("Total Pengalaman Kerja", 0, 40, 6)
 
-    # Bentuk input
-    input_data = pd.DataFrame([[joblevel, education, years_company, rating, total_years, jobrole]],
-        columns=['JobLevel', 'Education', 'YearsAtCompany', 'PerformanceRating', 'TotalWorkingYears', 'JobRole']
-    )
+    input_data = pd.DataFrame([{
+        'JobRole': jobrole,
+        'JobLevel': joblevel,
+        'Education': education,
+        'YearsAtCompany': years_company,
+        'PerformanceRating': rating,
+        'TotalWorkingYears': total_years
+    }])
 
-    # Model regresi dari data yang sudah dinormalisasi
-    from sklearn.ensemble import RandomForestRegressor
+    data_model = df[['JobRole', 'JobLevel', 'Education', 'YearsAtCompany',
+                     'PerformanceRating', 'TotalWorkingYears', 'MonthlyIncome']]
 
-    X = df[['JobLevel', 'Education', 'YearsAtCompany', 'PerformanceRating', 'TotalWorkingYears', 'JobRole']]
-    y = df['MonthlyIncome']  # ini sudah dinormalisasi (0–1)
+    combined = pd.concat([data_model.drop(columns='MonthlyIncome'), input_data], axis=0)
+    combined_encoded = pd.get_dummies(combined, columns=['JobRole'])
+    input_encoded = combined_encoded.tail(1)
+    X = combined_encoded.iloc[:-1]
+    y = data_model['MonthlyIncome']
+
     reg_model = RandomForestRegressor(random_state=42)
     reg_model.fit(X, y)
 
-    # Prediksi
-    salary_pred = reg_model.predict(input_data)[0]
+    salary_pred = reg_model.predict(input_encoded)[0]
 
-    # Denormalisasi
-    gaji_min = df['MonthlyIncome'].min()
-    gaji_max = df['MonthlyIncome'].max()
-    gaji_asli = salary_pred * (20000000 - 3000000) + 3000000
-    st.success(f"💵 Estimasi Gaji Bulanan: Rp {int(gaji_asli):,}")
+    st.success(f"💵 Estimasi Gaji Bulanan: Rp {int(salary_pred):,}")
 
-    # Feature importance
+    # Alasan
     importances = reg_model.feature_importances_
-    sorted_idx = np.argsort(importances)[::-1]
-    top_feats = [(input_data.columns[i], input_data.iloc[0, i], importances[i]) for i in sorted_idx[:3]]
+    feat_names = input_encoded.columns
+    sorted_idx = importances.argsort()[::-1]
 
-    st.markdown("### 🔍 Faktor Utama Penentu Gaji")
-
-    def interpret_reason(feat, val):
-        if feat == "JobLevel":
-            return "karena level jabatan cukup tinggi" if val >= 3 else "karena level jabatan masih rendah"
+    st.markdown("### 🔍 Faktor Penentu Gaji:")
+    def interpret(feat):
+        if "JobRole_" in feat:
+            return "karena jabatan tertentu"
+        elif feat == "JobLevel":
+            return "karena level jabatan tinggi" if input_data['JobLevel'][0] >= 3 else "karena level jabatan rendah"
         elif feat == "TotalWorkingYears":
-            return "karena pengalaman kerja panjang" if val >= 10 else "karena pengalaman kerja masih sedikit"
+            return "karena pengalaman panjang" if input_data['TotalWorkingYears'][0] >= 10 else "pengalaman minim"
         elif feat == "PerformanceRating":
-            return "karena performa kerja sangat baik" if val == 4 else "karena performa kerja biasa saja"
+            return "karena performa sangat baik" if input_data['PerformanceRating'][0] == 4 else "performa standar"
         elif feat == "Education":
-            return "karena tingkat pendidikan tinggi" if val >= 4 else "karena pendidikan standar"
+            return "karena pendidikan tinggi" if input_data['Education'][0] >= 4 else "pendidikan standar"
         elif feat == "YearsAtCompany":
-            return "karena sudah lama bekerja di perusahaan" if val >= 10 else "karena masih baru"
+            return "karena loyalitas lama" if input_data['YearsAtCompany'][0] >= 10 else "masih baru"
         else:
-            return "berkontribusi terhadap estimasi gaji"
+            return "kontribusi lain"
 
-    for feat, val, score in top_feats:
-        reason = interpret_reason(feat, val)
-        st.markdown(f"- **{feat} = {val}** → {reason} *(importance: {score:.2f})*")
+    for idx in sorted_idx[:5]:
+        feat = feat_names[idx]
+        score = importances[idx]
 
-    # Visualisasi
-    st.subheader("📊 Distribusi Gaji terhadap Pengalaman")
-    import plotly.express as px
-    fig2 = px.scatter(df, x='TotalWorkingYears', y='MonthlyIncome', color='JobLevel',
-                      title='Gaji Normalisasi vs Total Pengalaman Kerja',
-                      labels={'TotalWorkingYears': 'Total Working Years', 'MonthlyIncome': 'Monthly Income (0–1)'})
-    st.plotly_chart(fig2)
+        if "JobRole_" in feat:
+            readable = f"jabatan {feat.split('_')[1]}"
+            alasan = "karena jabatan tertentu"
+        elif feat == "JobLevel":
+            readable = "Level Jabatan"
+            alasan = "karena level jabatan tinggi" if input_data['JobLevel'][0] >= 3 else "karena level jabatan rendah"
+        elif feat == "TotalWorkingYears":
+            readable = "Total Pengalaman"
+            alasan = "karena pengalaman kerja panjang" if input_data['TotalWorkingYears'][0] >= 10 else "karena pengalaman rendah"
+        elif feat == "PerformanceRating":
+            readable = "Rating Performa"
+            alasan = "karena performa sangat baik" if input_data['PerformanceRating'][0] == 4 else "karena performa biasa"
+        elif feat == "Education":
+            readable = "Tingkat Pendidikan"
+            alasan = "karena pendidikan tinggi" if input_data['Education'][0] >= 4 else "karena pendidikan standar"
+        elif feat == "YearsAtCompany":
+            readable = "Lama di Perusahaan"
+            alasan = "karena loyalitas lama" if input_data['YearsAtCompany'][0] >= 10 else "karena masih cukup baru"
+        else:
+            readable = feat
+            alasan = "kontribusi lain"
 
-# === 3. Clustering ===
+        st.markdown(f"- **{readable}** → {alasan} *(importance: {score:.2f})*")
+
+
+    st.subheader("📊 Gaji vs Pengalaman")
+    fig = px.scatter(df, x='TotalWorkingYears', y='MonthlyIncome', color='JobLevel',
+                     title='Gaji vs Total Pengalaman Kerja')
+    st.plotly_chart(fig)
+
+# ============================
+# 3️⃣ CLUSTERING
+# ============================
+
 elif menu == "👥 Segmentasi Karyawan":
     st.title("👥 Segmentasi Karyawan")
 
@@ -180,26 +253,20 @@ elif menu == "👥 Segmentasi Karyawan":
     kmeans = KMeans(n_clusters=3, random_state=42)
     df['Cluster'] = kmeans.fit_predict(scaled)
 
-    # Visualisasi 2D
-    st.subheader("📌 Visualisasi Cluster (Income vs Masa Kerja)")
+    st.subheader("📌 Cluster: Income vs Masa Kerja")
     fig3 = px.scatter(df, x='MonthlyIncome', y='YearsAtCompany',
                       color='Cluster', hover_data=['JobRole', 'Department'],
                       title='Cluster Berdasarkan Income dan Masa Kerja')
     st.plotly_chart(fig3)
 
-    # Bar chart rata-rata gaji per cluster
     st.subheader("📈 Rata-rata Gaji per Cluster")
     avg_income = df.groupby('Cluster')['MonthlyIncome'].mean().reset_index()
-    fig4 = px.bar(avg_income, x='Cluster', y='MonthlyIncome',
-                  title='Rata-rata Gaji per Cluster',
-                  labels={'MonthlyIncome': 'Monthly Income'})
+    fig4 = px.bar(avg_income, x='Cluster', y='MonthlyIncome', title='Rata-rata Gaji per Cluster')
     st.plotly_chart(fig4)
 
-    # Boxplot distribusi umur
-    st.subheader("📦 Penyebaran Usia per Cluster")
-    fig5 = px.box(df, x='Cluster', y='Age', points="all", title="Distribusi Usia di Tiap Cluster")
+    st.subheader("📦 Usia per Cluster")
+    fig5 = px.box(df, x='Cluster', y='Age', points="all", title="Distribusi Usia")
     st.plotly_chart(fig5)
 
-    # Statistik tabel
-    st.subheader("📊 Statistik per Cluster")
+    st.subheader("📊 Statistik Rata-rata")
     st.dataframe(df.groupby('Cluster')[cols].mean().round(2))
